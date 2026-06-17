@@ -26,7 +26,6 @@ jobs:
       - run: npm ci
       - name: Build
         env:
-          # Set BASE to "/<your-repo-name>/" so asset paths resolve on Pages.
           BASE: /casa-ledger/
           VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY }}
           VITE_FIREBASE_AUTH_DOMAIN: ${{ secrets.VITE_FIREBASE_AUTH_DOMAIN }}
@@ -38,7 +37,6 @@ jobs:
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist
-
   deploy:
     needs: build
     runs-on: ubuntu-latest
