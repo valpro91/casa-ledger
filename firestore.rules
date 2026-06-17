@@ -1,0 +1,28 @@
+rules_version = '2';
+
+// Casa Ledger – Firestore security rules
+// These are what actually gate your data. Even though the Firebase API key
+// ships in the frontend (that's normal and safe), only the two email
+// addresses listed below can read or write anything.
+//
+// >>> EDIT the two emails below to match the accounts you create. <<<
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isOwner() {
+      return request.auth != null
+        && request.auth.token.email in [
+          'you@example.com',
+          'wife@example.com'
+        ];
+    }
+
+    // The single shared app document (and any future docs under /app).
+    match /app/{docId} {
+      allow read, write: if isOwner();
+    }
+
+    // Everything else is denied by default.
+  }
+}
