@@ -44,12 +44,19 @@ You only need to do step 1 once.
    These rules are what restrict all data access to only your two emails — even
    though the API key is public.
 
-7. **Grab your config.** Project **Settings (gear icon) → General →
-   Your apps → SDK setup and configuration**. You need four values:
+7. **Enable file storage (for document uploads).** Build → **Storage → Get
+   started**. Firebase Storage requires the **Blaze** (pay-as-you-go) plan — it
+   has a generous free allowance but needs a card on file. Then **Storage →
+   Rules** and paste [`storage.rules`](storage.rules) from this repo, **editing
+   the two emails** to match your accounts → **Publish**.
+
+8. **Grab your config.** Project **Settings (gear icon) → General →
+   Your apps → SDK setup and configuration**. You need five values:
    - `apiKey` → `VITE_FIREBASE_API_KEY`
    - `authDomain` → `VITE_FIREBASE_AUTH_DOMAIN`
    - `projectId` → `VITE_FIREBASE_PROJECT_ID`
    - `appId` → `VITE_FIREBASE_APP_ID`
+   - `storageBucket` → `VITE_FIREBASE_STORAGE_BUCKET`
 
 ---
 
@@ -69,11 +76,12 @@ Open the local URL it prints and sign in with one of the accounts you created.
 
 1. Create a new GitHub repo (e.g. `casa-ledger`) and push this folder to it.
 2. In the repo: **Settings → Secrets and variables → Actions → New repository
-   secret.** Add four secrets:
+   secret.** Add five secrets:
    - `VITE_FIREBASE_API_KEY`
    - `VITE_FIREBASE_AUTH_DOMAIN`
    - `VITE_FIREBASE_PROJECT_ID`
    - `VITE_FIREBASE_APP_ID`
+   - `VITE_FIREBASE_STORAGE_BUCKET`
 3. **Settings → Pages → Build and deployment → Source: GitHub Actions.**
 4. If your repo is **not** named `casa-ledger`, edit `.github/workflows/deploy.yml`
    and change `BASE: /casa-ledger/` to `/<your-repo-name>/`.
@@ -88,13 +96,31 @@ Open the local URL it prints and sign in with one of the accounts you created.
 
 1. Push this repo to GitHub.
 2. [vercel.com](https://vercel.com) → **Add New Project** → import the repo.
-3. Add the four `VITE_FIREBASE_*` environment variables in the project settings.
+3. Add the five `VITE_FIREBASE_*` environment variables in the project settings.
 4. Deploy. Leave `BASE` unset (defaults to `/`). Then add your Vercel domain to
    Firebase **Authorized domains** as above.
 
 Every `git push` redeploys automatically.
 
 ---
+
+## AI document auto-fill
+
+On the **Documents** page, **Upload & auto-fill** lets you pick a PDF or photo;
+Claude reads it and pre-fills the title, type, property and expiry date for you to
+confirm. The file itself is saved to your Firebase Storage and linked on the entry.
+
+To turn it on, open **Settings → AI document assistant** and paste a Claude API
+key (create one at [console.anthropic.com](https://console.anthropic.com/settings/keys)).
+
+**How the key is handled — please read.** This app has no server, so the browser
+calls Claude directly using the key you paste. The key is stored in your private
+Firestore database (shared between your two accounts, locked to your two emails by
+the rules) and is **never** baked into the public site. The trade-off of having no
+server is that the key lives in your browser at runtime. That's fine for a private
+two-person app, but treat the key as a shared secret and rotate it from the
+Anthropic console if it's ever exposed. (Backups exported from Settings deliberately
+strip the key.) Each Claude call costs roughly a cent or less per document.
 
 ## Adding it to your phone
 
@@ -118,7 +144,9 @@ full-screen like a native app.
 src/
   App.jsx        UI + the Dashboard (and the Root auth gate)
   Login.jsx      sign-in screen
-  firebase.js    Firebase init + load/save/subscribe + auth helpers
+  firebase.js    Firebase init + load/save/subscribe + auth + file upload
+  ai.js          Claude document analysis (suggest title/type/property/expiry)
 firestore.rules  database security (your two emails only)
+storage.rules    file-storage security (your two emails only)
 .github/workflows/deploy.yml   GitHub Pages build & deploy
 ```

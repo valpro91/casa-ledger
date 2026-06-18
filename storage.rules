@@ -1,0 +1,31 @@
+rules_version = '2';
+
+// Casa Ledger – Firebase Storage security rules (for uploaded document files).
+// Same idea as firestore.rules: only your two email addresses can read or
+// write anything. Publish this in the Firebase console under
+// Build -> Storage -> Rules.
+//
+// >>> EDIT the two emails below to match the accounts you create. <<<
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function isOwner() {
+      return request.auth != null
+        && request.auth.token.email in [
+          'you@example.com',
+          'wife@example.com'
+        ];
+    }
+
+    // Document files uploaded from the app.
+    match /documents/{file=**} {
+      allow read, write: if isOwner();
+    }
+
+    // Everything else is denied by default.
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

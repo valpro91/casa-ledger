@@ -2,9 +2,11 @@ import React, { useState, useEffect, useRef, useMemo } from "react";
 import {
   Home, Building2, Banknote, Wrench, FileText, Settings as SettingsIcon,
   Plus, Check, X, Clock, AlertTriangle, ChevronRight, Phone, Calendar,
-  Trash2, Pencil, ExternalLink, CircleDot, ArrowLeft, Download, Upload, LogOut
+  Trash2, Pencil, ExternalLink, CircleDot, ArrowLeft, Download, Upload, LogOut,
+  Sparkles, Loader2, Users, Search, ReceiptText
 } from "lucide-react";
-import { loadState, saveState, subscribeState, onAuth, signOutUser } from "./firebase";
+import { loadState, saveState, subscribeState, onAuth, signOutUser, uploadDocFile } from "./firebase";
+import { suggestDocMeta, canAnalyze } from "./ai";
 import Login from "./Login";
 
 /* ------------------------------------------------------------------ */
@@ -83,6 +85,53 @@ function hoaPeriods(freq) {
     }
   }
   return out;
+}
+
+function propertyFinancials(data, propertyId) {
+  const prop = data.properties.find((p) => p.id === propertyId);
+  if (!prop) return { income: 0, expenses: 0, net: 0, rows: [] };
+  const rows = [];
+  data.rent
+    .filter((r) => r.propertyId === propertyId && r.status !== "clear")
+    .forEach((r) => rows.push({
+      id: `rent-${r.period}`,
+      date: r.paidDate || `${r.period}-01`,
+      type: "Income",
+      label: `Rent · ${monthLabel(r.period)}`,
+      amount: Number(r.paidAmount) || Number(prop.monthlyRent) || 0,
+    }));
+  data.hoa
+    .filter((h) => h.propertyId === propertyId)
+    .forEach((h) => rows.push({
+      id: `hoa-${h.id || h.period}`,
+      date: h.paidDate || "",
+      type: "Expense",
+      label: `HOA · ${h.period}`,
+      amount: -(Number(h.amount) || Number(prop.hoaAmount) || 0),
+    }));
+  data.repairs
+    .filter((r) => r.propertyId === propertyId && Number(r.cost) > 0)
+    .forEach((r) => rows.push({
+      id: `repair-${r.id}`,
+      date: r.scheduledDate || r.createdDate || "",
+      type: "Expense",
+      label: `Repair · ${r.title}`,
+      amount: -(Number(r.cost) || 0),
+    }));
+  (data.transactions || [])
+    .filter((t) => t.propertyId === propertyId)
+    .forEach((t) => rows.push({
+      id: `tx-${t.id}`,
+      date: t.date || "",
+      type: t.direction === "in" ? "Income" : "Expense",
+      label: t.category || t.note || "Transaction",
+      amount: (t.direction === "in" ? 1 : -1) * (Number(t.amount) || 0),
+      party: t.party,
+    }));
+  rows.sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+  const income = rows.filter((r) => r.amount > 0).reduce((s, r) => s + r.amount, 0);
+  const expenses = rows.filter((r) => r.amount < 0).reduce((s, r) => s + Math.abs(r.amount), 0);
+  return { income, expenses, net: income - expenses, rows };
 }
 
 /* ------------------------------------------------------------------ */
@@ -240,6 +289,16 @@ a{color:var(--brand)}
 .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin-top:12px}
 .legend span{display:inline-flex;align-items:center;gap:5px}
 .lg{width:13px;height:13px;border-radius:4px;display:inline-block}
+.clickcard{transition:transform .08s,box-shadow .12s,border-color .12s;cursor:pointer}
+.clickcard:hover{transform:translateY(-1px);border-color:#cbd9d2;box-shadow:0 5px 20px rgba(16,48,43,.08)}
+.backline{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:13px;font-weight:700;margin-bottom:14px}
+.tabs{display:flex;gap:6px;flex-wrap:wrap;margin:0 0 16px}
+.tabs button{padding:8px 12px;border-radius:9px;font-size:13px;font-weight:700;color:var(--muted)}
+.tabs button.on{background:#fff;color:var(--ink);box-shadow:var(--shadow)}
+.toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:16px}
+.searchbox{position:relative;min-width:220px;flex:1}
+.searchbox svg{position:absolute;left:11px;top:50%;transform:translateY(-50%);color:var(--muted)}
+.searchbox input{width:100%;padding:10px 12px 10px 36px;border:1px solid var(--line);border-radius:9px;background:#fff}
 
 @media (max-width:760px){
   .side{display:none}
@@ -255,6 +314,8 @@ a{color:var(--brand)}
   .frow{flex-direction:column;gap:0}
   .sheet{max-width:none}
 }
+.spin{animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 `;
 
@@ -299,7 +360,7 @@ function StatusBadge({ state }) {
 /* ------------------------------------------------------------------ */
 /*  Main App                                                           */
 /* ------------------------------------------------------------------ */
-const BLANK = { settings: { currency: "USD" }, properties: [], rent: [], hoa: [], repairs: [], docs: [] };
+const BLANK = { settings: { currency: "USD" }, properties: [], rent: [], hoa: [], repairs: [], docs: [], transactions: [], contacts: [] };
 
 export default function Dashboard({ onSignOut, userEmail }) {
   const [data, setData] = useState(BLANK);
@@ -372,6 +433,7 @@ export default function Dashboard({ onSignOut, userEmail }) {
     ["properties", "Properties", Building2, 0],
     ["payments", "Payments", Banknote, attention.overdueRent.length + attention.hoaDue.length],
     ["repairs", "Repairs", Wrench, attention.openRepairs.length],
+    ["directory", "Directory", Users, 0],
     ["docs", "Documents", FileText, 0],
     ["settings", "Settings", SettingsIcon, 0],
   ];
@@ -416,6 +478,7 @@ export default function Dashboard({ onSignOut, userEmail }) {
             {view === "properties" && <PropertiesView {...{ data, ccy, update }} />}
             {view === "payments" && <PaymentsView {...{ data, ccy, update, months }} />}
             {view === "repairs" && <RepairsView {...{ data, ccy, update }} />}
+            {view === "directory" && <DirectoryView {...{ data, update }} />}
             {view === "docs" && <DocsView {...{ data, update }} />}
             {view === "settings" && <SettingsView {...{ data, update, setData, onSignOut, userEmail }} />}
           </div>
@@ -424,7 +487,7 @@ export default function Dashboard({ onSignOut, userEmail }) {
 
       {/* mobile tabbar */}
       <nav className="tabbar">
-        {navItems.slice(0, 5).map(([k, label, Icon, n]) => (
+        {navItems.slice(0, 6).map(([k, label, Icon, n]) => (
           <button key={k} className={`tab ${view === k ? "on" : ""}`} onClick={() => setView(k)}>
             {n > 0 && <span className="tbadge pm-num">{n}</span>}
             <Icon size={21} /><span>{label}</span>
@@ -540,6 +603,8 @@ function HomeView({ data, ccy, attention, months, setView }) {
 /* ------------------------------------------------------------------ */
 function PropertiesView({ data, ccy, update }) {
   const [editing, setEditing] = useState(null); // property obj or {} for new
+  const [selectedId, setSelectedId] = useState(null);
+  const selected = data.properties.find((p) => p.id === selectedId);
   const save = (p) => {
     if (p.id) update({ properties: data.properties.map((x) => (x.id === p.id ? p : x)) });
     else update({ properties: [...data.properties, { ...p, id: uid(), color: PROP_COLORS[data.properties.length % PROP_COLORS.length] }] });
@@ -554,7 +619,21 @@ function PropertiesView({ data, ccy, update }) {
       docs: data.docs.filter((d) => d.propertyId !== id),
     });
     setEditing(null);
+    setSelectedId(null);
   };
+
+  if (selected) {
+    return (
+      <PropertyWorkspace
+        property={selected}
+        data={data}
+        ccy={ccy}
+        update={update}
+        onBack={() => setSelectedId(null)}
+        onEdit={() => setEditing(selected)}
+      />
+    );
+  }
 
   return (
     <>
@@ -569,27 +648,183 @@ function PropertiesView({ data, ccy, update }) {
           action={<button className="btn" onClick={() => setEditing({ rentDueDay: 1, hoaFrequency: "monthly" })}><Plus size={16} /> Add property</button>} /></div>
       ) : (
         <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fill,minmax(280px,1fr))" }}>
-          {data.properties.map((p) => (
-            <div className="card" key={p.id} style={{ padding: 18 }}>
+          {data.properties.map((p) => {
+            const openRepairs = data.repairs.filter((r) => r.propertyId === p.id && r.status !== "done").length;
+            const docs = data.docs.filter((d) => d.propertyId === p.id).length;
+            const fin = propertyFinancials(data, p.id);
+            return (
+            <div className="card clickcard" key={p.id} style={{ padding: 18 }} onClick={() => setSelectedId(p.id)}>
               <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
                 <span className="dot" style={{ background: p.color, width: 12, height: 12 }} />
                 <b style={{ fontSize: 16, flex: 1 }} className="trunc">{p.name}</b>
-                <button className="iconbtn" onClick={() => setEditing(p)} aria-label="Edit"><Pencil size={16} /></button>
+                <button className="iconbtn" onClick={(e) => { e.stopPropagation(); setEditing(p); }} aria-label="Edit"><Pencil size={16} /></button>
               </div>
               <div className="sub" style={{ color: "var(--muted)", fontSize: 13, marginBottom: 12 }}>{p.address || "No address"}</div>
               <div style={{ display: "grid", gap: 8, fontSize: 14 }}>
                 <Line label="Tenant" val={p.tenantName || "—"} />
                 {p.tenantContact && <Line label="Contact" val={p.tenantContact} />}
                 <Line label="Rent" val={`${money(p.monthlyRent, ccy)} · due day ${p.rentDueDay || 1}`} />
+                <Line label="Net" val={money(fin.net, ccy)} />
                 {Number(p.hoaAmount) > 0 && <Line label="HOA" val={`${money(p.hoaAmount, ccy)} ${p.hoaFrequency || "monthly"}`} />}
                 {(p.leaseStart || p.leaseEnd) && <Line label="Lease" val={`${fmtDate(p.leaseStart) || "?"} – ${fmtDate(p.leaseEnd) || "ongoing"}`} />}
               </div>
+              <div className="legend" style={{ marginTop: 14 }}>
+                <span><Wrench size={13} /> {openRepairs} open repairs</span>
+                <span><FileText size={13} /> {docs} docs</span>
+              </div>
             </div>
-          ))}
+          );})}
         </div>
       )}
 
       {editing && <PropertyEditor property={editing} ccy={ccy} onSave={save} onDelete={remove} onClose={() => setEditing(null)} />}
+    </>
+  );
+}
+
+function PropertyWorkspace({ property, data, ccy, update, onBack, onEdit }) {
+  const [tab, setTab] = useState("overview");
+  const [repairEditing, setRepairEditing] = useState(null);
+  const [docEditing, setDocEditing] = useState(null);
+  const [txEditing, setTxEditing] = useState(null);
+  const thisMonth = monthKey(new Date());
+  const st = rentStatus(property, thisMonth, data.rent);
+  const repairs = data.repairs.filter((r) => r.propertyId === property.id);
+  const docs = data.docs.filter((d) => d.propertyId === property.id);
+  const txs = (data.transactions || []).filter((t) => t.propertyId === property.id);
+  const fin = propertyFinancials(data, property.id);
+
+  const saveRepair = (r) => {
+    if (r.id) update({ repairs: data.repairs.map((x) => (x.id === r.id ? r : x)) });
+    else update({ repairs: [{ ...r, id: uid(), propertyId: property.id, createdDate: todayISO() }, ...data.repairs] });
+    setRepairEditing(null);
+  };
+  const removeRepair = (id) => { update({ repairs: data.repairs.filter((r) => r.id !== id) }); setRepairEditing(null); };
+  const saveDoc = (d) => {
+    if (d.id) update({ docs: data.docs.map((x) => (x.id === d.id ? d : x)) });
+    else update({ docs: [{ ...d, id: uid(), propertyId: property.id, addedDate: todayISO() }, ...data.docs] });
+    setDocEditing(null);
+  };
+  const removeDoc = (id) => { update({ docs: data.docs.filter((d) => d.id !== id) }); setDocEditing(null); };
+  const saveTx = (t) => {
+    if (t.id) update({ transactions: (data.transactions || []).map((x) => (x.id === t.id ? t : x)) });
+    else update({ transactions: [{ ...t, id: uid(), propertyId: property.id }, ...(data.transactions || [])] });
+    setTxEditing(null);
+  };
+  const removeTx = (id) => { update({ transactions: (data.transactions || []).filter((t) => t.id !== id) }); setTxEditing(null); };
+
+  return (
+    <>
+      <button className="backline" onClick={onBack}><ArrowLeft size={16} /> Properties</button>
+      <div className="page-h">
+        <div>
+          <h1>{property.name}</h1>
+          <p>{property.address || "No address"} · {property.tenantName || "No tenant"}</p>
+        </div>
+        <button className="btn ghost" onClick={onEdit}><Pencil size={15} /> Edit property</button>
+      </div>
+      <div className="tabs">
+        {[["overview", "Overview"], ["payments", "Payments"], ["repairs", "Repairs"], ["docs", "Documents"], ["accounting", "Accounting"]].map(([k, label]) => (
+          <button key={k} className={tab === k ? "on" : ""} onClick={() => setTab(k)}>{label}</button>
+        ))}
+      </div>
+
+      {tab === "overview" && (
+        <>
+          <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(170px,1fr))", marginBottom: 16 }}>
+            <div className="card stat"><span className="eyebrow">Rent status</span><div style={{ marginTop: 8 }}><StatusBadge state={st.state === "na" ? "upcoming" : st.state} /></div></div>
+            <div className="card stat"><span className="eyebrow">Monthly rent</span><div className="v pm-num">{money(property.monthlyRent, ccy)}</div></div>
+            <div className="card stat"><span className="eyebrow">Open repairs</span><div className="v pm-num">{repairs.filter((r) => r.status !== "done").length}</div></div>
+            <div className="card stat"><span className="eyebrow">Net accounting</span><div className="v pm-num">{money(fin.net, ccy)}</div></div>
+          </div>
+          <div className="card" style={{ padding: 18 }}>
+            <div style={{ display: "grid", gap: 10, fontSize: 14 }}>
+              <Line label="Tenant" val={property.tenantName || "—"} />
+              <Line label="Contact" val={property.tenantContact || "—"} />
+              <Line label="Lease" val={`${fmtDate(property.leaseStart) || "?"} – ${fmtDate(property.leaseEnd) || "ongoing"}`} />
+              <Line label="HOA" val={Number(property.hoaAmount) > 0 ? `${money(property.hoaAmount, ccy)} ${property.hoaFrequency || "monthly"}` : "—"} />
+              {property.notes && <Line label="Notes" val={property.notes} />}
+            </div>
+          </div>
+        </>
+      )}
+
+      {tab === "payments" && (
+        <>
+          <div className="toolbar">
+            <button className="btn" onClick={() => setTxEditing({ propertyId: property.id, direction: "in", date: todayISO(), category: "Other income" })}><Plus size={16} /> Add transaction</button>
+          </div>
+          <div className="card">
+            {[...txs].sort((a, b) => (b.date || "").localeCompare(a.date || "")).map((t) => (
+              <div className="row" key={t.id} style={{ cursor: "pointer" }} onClick={() => setTxEditing(t)}>
+                <Banknote size={18} color="var(--muted)" />
+                <div className="grow">
+                  <div className="title trunc">{t.category || "Transaction"} {t.direction === "out" && <span className="bdg bad" style={{ marginLeft: 4 }}>Outbound</span>}</div>
+                  <div className="sub trunc">{fmtDate(t.date)}{t.party ? ` · ${t.party}` : ""}{t.note ? ` · ${t.note}` : ""}</div>
+                </div>
+                <b className="pm-num" style={{ color: t.direction === "out" ? "var(--bad)" : "var(--good)" }}>{t.direction === "out" ? "-" : "+"}{money(t.amount, ccy)}</b>
+              </div>
+            ))}
+            {txs.length === 0 && <Empty icon={<ReceiptText size={26} />} title="No property transactions" text="Add one-off income or expenses here. Rent and HOA are still tracked globally." />}
+          </div>
+        </>
+      )}
+
+      {tab === "repairs" && (
+        <>
+          <div className="toolbar"><button className="btn" onClick={() => setRepairEditing({ propertyId: property.id, status: "new", priority: "medium" })}><Plus size={16} /> Add repair</button></div>
+          <div className="card">
+            {repairs.map((r) => (
+              <div className="row" key={r.id} style={{ cursor: "pointer" }} onClick={() => setRepairEditing(r)}>
+                <Wrench size={18} color="var(--muted)" />
+                <div className="grow"><div className="title trunc">{r.title}</div><div className="sub trunc">{r.handyman || "No repairman"}{r.scheduledDate ? ` · ${fmtDate(r.scheduledDate)}` : ""}{r.cost ? ` · ${money(r.cost, ccy)}` : ""}</div></div>
+                <StatusBadge state={r.status} />
+              </div>
+            ))}
+            {repairs.length === 0 && <Empty icon={<Wrench size={26} />} title="No repairs for this property" text="Track maintenance issues and repairman visits here." />}
+          </div>
+        </>
+      )}
+
+      {tab === "docs" && (
+        <>
+          <div className="toolbar"><button className="btn" onClick={() => setDocEditing({ type: "lease", propertyId: property.id })}><Plus size={16} /> Add document</button></div>
+          <div className="card">
+            {docs.map((d) => (
+              <div className="row" key={d.id} style={{ cursor: "pointer" }} onClick={() => setDocEditing(d)}>
+                <FileText size={18} color="var(--muted)" />
+                <div className="grow"><div className="title trunc">{d.title}</div><div className="sub trunc">{DOC_TYPES.find((t) => t[0] === d.type)?.[1] || d.type}{d.expiryDate ? ` · expires ${fmtDate(d.expiryDate)}` : ""}</div></div>
+                {d.link && <a href={d.link} target="_blank" rel="noreferrer" className="iconbtn" onClick={(e) => e.stopPropagation()}><ExternalLink size={16} /></a>}
+              </div>
+            ))}
+            {docs.length === 0 && <Empty icon={<FileText size={26} />} title="No documents for this property" text="Attach leases, titles, inspections, insurance, and tax records." />}
+          </div>
+        </>
+      )}
+
+      {tab === "accounting" && (
+        <>
+          <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(170px,1fr))", marginBottom: 16 }}>
+            <div className="card stat"><span className="eyebrow">Income</span><div className="v pm-num">{money(fin.income, ccy)}</div></div>
+            <div className="card stat"><span className="eyebrow">Expenses</span><div className="v pm-num">{money(fin.expenses, ccy)}</div></div>
+            <div className="card stat"><span className="eyebrow">Net</span><div className="v pm-num">{money(fin.net, ccy)}</div></div>
+          </div>
+          <div className="card">
+            {fin.rows.map((r) => (
+              <div className="row" key={r.id}>
+                <ReceiptText size={18} color="var(--muted)" />
+                <div className="grow"><div className="title trunc">{r.label}</div><div className="sub trunc">{r.type}{r.date ? ` · ${fmtDate(r.date)}` : ""}{r.party ? ` · ${r.party}` : ""}</div></div>
+                <b className="pm-num" style={{ color: r.amount < 0 ? "var(--bad)" : "var(--good)" }}>{r.amount < 0 ? "-" : "+"}{money(Math.abs(r.amount), ccy)}</b>
+              </div>
+            ))}
+            {fin.rows.length === 0 && <Empty icon={<ReceiptText size={26} />} title="No accounting records yet" text="Rent, HOA, repair costs, and transactions will appear here." />}
+          </div>
+        </>
+      )}
+
+      {repairEditing && <RepairEditor repair={repairEditing} properties={data.properties} ccy={ccy} onSave={saveRepair} onDelete={removeRepair} onClose={() => setRepairEditing(null)} />}
+      {docEditing && <DocEditor doc={docEditing} properties={data.properties} onSave={saveDoc} onDelete={removeDoc} onClose={() => setDocEditing(null)} />}
+      {txEditing && <TransactionEditor tx={txEditing} properties={data.properties} ccy={ccy} onSave={saveTx} onDelete={removeTx} onClose={() => setTxEditing(null)} />}
     </>
   );
 }
@@ -643,20 +878,28 @@ function PropertyEditor({ property, ccy, onSave, onDelete, onClose }) {
 function PaymentsView({ data, ccy, update, months }) {
   const [tab, setTab] = useState("rent");
   const [cell, setCell] = useState(null); // {prop, mk, status}
+  const [editingTx, setEditingTx] = useState(null);
 
   const saveRent = (rec) => {
     const others = data.rent.filter((r) => !(r.propertyId === rec.propertyId && r.period === rec.period));
     update({ rent: rec.status === "clear" ? others : [...others, rec] });
     setCell(null);
   };
+  const saveTx = (t) => {
+    if (t.id) update({ transactions: (data.transactions || []).map((x) => (x.id === t.id ? t : x)) });
+    else update({ transactions: [{ ...t, id: uid() }, ...(data.transactions || [])] });
+    setEditingTx(null);
+  };
+  const removeTx = (id) => { update({ transactions: (data.transactions || []).filter((t) => t.id !== id) }); setEditingTx(null); };
 
   return (
     <>
       <div className="page-h">
-        <div><h1>Payments</h1><p>Tap a cell to record or clear a payment</p></div>
+        <div><h1>Payments</h1><p>Global rent, HOA, incoming and outgoing payment tracking</p></div>
         <div className="seg">
           <button className={tab === "rent" ? "on" : ""} onClick={() => setTab("rent")}>Rent</button>
           <button className={tab === "hoa" ? "on" : ""} onClick={() => setTab("hoa")}>HOA</button>
+          <button className={tab === "transactions" ? "on" : ""} onClick={() => setTab("transactions")}>Transactions</button>
         </div>
       </div>
 
@@ -689,12 +932,97 @@ function PaymentsView({ data, ccy, update, months }) {
             <span><i className="lg" style={{ background: "#fff", border: "1.5px dashed var(--line)" }} /> Due</span>
           </div>
         </>
-      ) : (
+      ) : tab === "hoa" ? (
         <HoaPanel data={data} ccy={ccy} update={update} />
-      )}
+      ) : null}
 
       {cell && <RentEditor cell={cell} ccy={ccy} onSave={saveRent} onClose={() => setCell(null)} />}
+      {tab === "transactions" && (
+        <TransactionsPanel data={data} ccy={ccy} onEdit={setEditingTx} onAdd={() => setEditingTx({ direction: "out", propertyId: data.properties[0]?.id || "", date: todayISO(), category: "Repair" })} />
+      )}
+      {editingTx && <TransactionEditor tx={editingTx} properties={data.properties} ccy={ccy} onSave={saveTx} onDelete={removeTx} onClose={() => setEditingTx(null)} />}
     </>
+  );
+}
+
+function TransactionsPanel({ data, ccy, onEdit, onAdd }) {
+  const [q, setQ] = useState("");
+  const props = Object.fromEntries(data.properties.map((p) => [p.id, p]));
+  const list = (data.transactions || [])
+    .filter((t) => {
+      const hay = `${t.category || ""} ${t.party || ""} ${t.note || ""} ${props[t.propertyId]?.name || ""}`.toLowerCase();
+      return hay.includes(q.toLowerCase());
+    })
+    .sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+  const income = list.filter((t) => t.direction === "in").reduce((s, t) => s + (Number(t.amount) || 0), 0);
+  const out = list.filter((t) => t.direction === "out").reduce((s, t) => s + (Number(t.amount) || 0), 0);
+  return (
+    <>
+      <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(170px,1fr))", marginBottom: 16 }}>
+        <div className="card stat"><span className="eyebrow">Inbound</span><div className="v pm-num">{money(income, ccy)}</div></div>
+        <div className="card stat"><span className="eyebrow">Outbound</span><div className="v pm-num">{money(out, ccy)}</div></div>
+        <div className="card stat"><span className="eyebrow">Net</span><div className="v pm-num">{money(income - out, ccy)}</div></div>
+      </div>
+      <div className="toolbar">
+        <div className="searchbox"><Search size={16} /><input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search property, party, note…" /></div>
+        <button className="btn" onClick={onAdd}><Plus size={16} /> Add transaction</button>
+      </div>
+      <div className="card">
+        {list.map((t) => {
+          const p = props[t.propertyId];
+          return (
+            <div className="row" key={t.id} style={{ cursor: "pointer" }} onClick={() => onEdit(t)}>
+              <Banknote size={18} color="var(--muted)" />
+              <div className="grow">
+                <div className="title trunc">{t.category || "Transaction"} <span className={`bdg ${t.direction === "in" ? "good" : "bad"}`} style={{ marginLeft: 4 }}>{t.direction === "in" ? "Inbound" : "Outbound"}</span></div>
+                <div className="sub trunc">{p?.name || "General"} · {fmtDate(t.date)}{t.party ? ` · ${t.party}` : ""}{t.note ? ` · ${t.note}` : ""}</div>
+              </div>
+              <b className="pm-num" style={{ color: t.direction === "out" ? "var(--bad)" : "var(--good)" }}>{t.direction === "out" ? "-" : "+"}{money(t.amount, ccy)}</b>
+            </div>
+          );
+        })}
+        {list.length === 0 && <Empty icon={<ReceiptText size={26} />} title="No transactions found" text="Track deposits, supplies, utilities, reimbursements, and other non-rent payments." action={<button className="btn" onClick={onAdd}><Plus size={16} /> Add transaction</button>} />}
+      </div>
+    </>
+  );
+}
+
+function TransactionEditor({ tx, properties, ccy, onSave, onDelete, onClose }) {
+  const [t, setT] = useState({ direction: "out", propertyId: "", date: todayISO(), amount: "", category: "", party: "", method: "", note: "", ...tx });
+  const set = (k, v) => setT((o) => ({ ...o, [k]: v }));
+  return (
+    <Sheet title={tx.id ? "Edit transaction" : "Add transaction"} onClose={onClose}
+      footer={<>
+        {tx.id && <button className="btn danger" onClick={() => onDelete(tx.id)}><Trash2 size={15} /> Delete</button>}
+        <div style={{ flex: 1 }} />
+        <button className="btn ghost" onClick={onClose}>Cancel</button>
+        <button className="btn" onClick={() => t.amount && onSave({ ...t, amount: Number(t.amount) || 0 })}>Save</button>
+      </>}>
+      <Field label="Direction">
+        <div className="seg" style={{ display: "flex" }}>
+          <button className={t.direction === "in" ? "on" : ""} style={{ flex: 1 }} onClick={() => set("direction", "in")}>Inbound</button>
+          <button className={t.direction === "out" ? "on" : ""} style={{ flex: 1 }} onClick={() => set("direction", "out")}>Outbound</button>
+        </div>
+      </Field>
+      <div className="frow">
+        <Field label="Property">
+          <select value={t.propertyId} onChange={(e) => set("propertyId", e.target.value)}>
+            <option value="">General</option>
+            {properties.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+        </Field>
+        <Field label="Date"><input type="date" value={t.date} onChange={(e) => set("date", e.target.value)} /></Field>
+      </div>
+      <div className="frow">
+        <Field label={`Amount (${ccy})`}><input type="number" value={t.amount} onChange={(e) => set("amount", e.target.value)} /></Field>
+        <Field label="Category"><input value={t.category} onChange={(e) => set("category", e.target.value)} placeholder="Repair, deposit, utility…" /></Field>
+      </div>
+      <div className="frow">
+        <Field label="Paid by / to"><input value={t.party} onChange={(e) => set("party", e.target.value)} placeholder="Tenant, repairman, vendor…" /></Field>
+        <Field label="Method"><input value={t.method} onChange={(e) => set("method", e.target.value)} placeholder="Cash, bank transfer…" /></Field>
+      </div>
+      <Field label="Note"><textarea value={t.note} onChange={(e) => set("note", e.target.value)} /></Field>
+    </Sheet>
   );
 }
 
@@ -868,11 +1196,108 @@ function RepairEditor({ repair, properties, ccy, onSave, onDelete, onClose }) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Directory                                                          */
+/* ------------------------------------------------------------------ */
+function DirectoryView({ data, update }) {
+  const [editing, setEditing] = useState(null);
+  const [filter, setFilter] = useState("all");
+  const [q, setQ] = useState("");
+  const save = (c) => {
+    if (c.id) update({ contacts: (data.contacts || []).map((x) => (x.id === c.id ? c : x)) });
+    else update({ contacts: [{ ...c, id: uid() }, ...(data.contacts || [])] });
+    setEditing(null);
+  };
+  const remove = (id) => { update({ contacts: (data.contacts || []).filter((c) => c.id !== id) }); setEditing(null); };
+  const propertyById = (id) => data.properties.find((p) => p.id === id);
+  const tenantRows = data.properties
+    .filter((p) => p.tenantName || p.tenantContact)
+    .map((p) => ({ id: `tenant-${p.id}`, type: "tenant", name: p.tenantName || "Unnamed tenant", phone: p.tenantContact || "", propertyId: p.id, derived: true }));
+  const contacts = [...tenantRows, ...(data.contacts || [])]
+    .filter((c) => filter === "all" || c.type === filter)
+    .filter((c) => {
+      const p = propertyById(c.propertyId);
+      return `${c.name || ""} ${c.phone || ""} ${c.email || ""} ${c.company || ""} ${p?.name || ""}`.toLowerCase().includes(q.toLowerCase());
+    });
+  return (
+    <>
+      <div className="page-h">
+        <div><h1>Directory</h1><p>Global tenant and repairman contacts</p></div>
+        <button className="btn" onClick={() => setEditing({ type: "repairman" })}><Plus size={16} /> Add contact</button>
+      </div>
+      <div className="toolbar">
+        <div className="seg">
+          {[["all", "All"], ["tenant", "Tenants"], ["repairman", "Repairmen"]].map(([k, l]) => (
+            <button key={k} className={filter === k ? "on" : ""} onClick={() => setFilter(k)}>{l}</button>
+          ))}
+        </div>
+        <div className="searchbox"><Search size={16} /><input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search names, phone, property…" /></div>
+      </div>
+      <div className="card">
+        {contacts.map((c) => {
+          const p = propertyById(c.propertyId);
+          return (
+            <div className="row" key={c.id} style={{ cursor: c.derived ? "default" : "pointer" }} onClick={() => !c.derived && setEditing(c)}>
+              <Users size={18} color="var(--muted)" />
+              <div className="grow">
+                <div className="title trunc">{c.name || "Unnamed contact"} <span className={`bdg ${c.type === "tenant" ? "info" : "neutral"}`} style={{ marginLeft: 4 }}>{c.type === "tenant" ? "Tenant" : "Repairman"}</span></div>
+                <div className="sub trunc">{p?.name || c.company || "General"}{c.phone ? ` · ${c.phone}` : ""}{c.email ? ` · ${c.email}` : ""}</div>
+              </div>
+              {c.derived ? <span className="bdg neutral">From property</span> : <ChevronRight size={18} color="var(--muted)" />}
+            </div>
+          );
+        })}
+        {contacts.length === 0 && <Empty icon={<Users size={26} />} title="No contacts found" text="Add repairmen here. Tenants also appear automatically from property records." action={<button className="btn" onClick={() => setEditing({ type: "repairman" })}><Plus size={16} /> Add contact</button>} />}
+      </div>
+      {editing && <ContactEditor contact={editing} properties={data.properties} onSave={save} onDelete={remove} onClose={() => setEditing(null)} />}
+    </>
+  );
+}
+
+function ContactEditor({ contact, properties, onSave, onDelete, onClose }) {
+  const [c, setC] = useState({ type: "repairman", name: "", phone: "", email: "", company: "", propertyId: "", notes: "", ...contact });
+  const set = (k, v) => setC((o) => ({ ...o, [k]: v }));
+  return (
+    <Sheet title={contact.id ? "Edit contact" : "Add contact"} onClose={onClose}
+      footer={<>
+        {contact.id && <button className="btn danger" onClick={() => onDelete(contact.id)}><Trash2 size={15} /> Delete</button>}
+        <div style={{ flex: 1 }} />
+        <button className="btn ghost" onClick={onClose}>Cancel</button>
+        <button className="btn" onClick={() => c.name && onSave(c)}>Save</button>
+      </>}>
+      <Field label="Type">
+        <select value={c.type} onChange={(e) => set("type", e.target.value)}>
+          <option value="tenant">Tenant</option>
+          <option value="repairman">Repairman</option>
+        </select>
+      </Field>
+      <Field label="Name"><input value={c.name} onChange={(e) => set("name", e.target.value)} /></Field>
+      <div className="frow">
+        <Field label="Phone"><input value={c.phone} onChange={(e) => set("phone", e.target.value)} /></Field>
+        <Field label="Email"><input value={c.email} onChange={(e) => set("email", e.target.value)} /></Field>
+      </div>
+      <div className="frow">
+        <Field label="Company"><input value={c.company} onChange={(e) => set("company", e.target.value)} /></Field>
+        <Field label="Linked property">
+          <select value={c.propertyId} onChange={(e) => set("propertyId", e.target.value)}>
+            <option value="">General</option>
+            {properties.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+        </Field>
+      </div>
+      <Field label="Notes"><textarea value={c.notes} onChange={(e) => set("notes", e.target.value)} /></Field>
+    </Sheet>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /*  Documents                                                          */
 /* ------------------------------------------------------------------ */
 const DOC_TYPES = [["lease", "Lease"], ["insurance", "Insurance"], ["deed", "Deed / Title"], ["inspection", "Inspection"], ["tax", "Tax"], ["other", "Other"]];
 function DocsView({ data, update }) {
   const [editing, setEditing] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [q, setQ] = useState("");
+  const fileRef = useRef(null);
   const save = (d) => {
     if (d.id) update({ docs: data.docs.map((x) => (x.id === d.id ? d : x)) });
     else update({ docs: [{ ...d, id: uid(), addedDate: todayISO() }, ...data.docs] });
@@ -880,25 +1305,71 @@ function DocsView({ data, update }) {
   };
   const remove = (id) => { update({ docs: data.docs.filter((d) => d.id !== id) }); setEditing(null); };
   const propName = (id) => data.properties.find((p) => p.id === id);
-  const sorted = [...data.docs].sort((a, b) => {
-    const da = a.expiryDate ? daysUntil(a.expiryDate) : 99999, db = b.expiryDate ? daysUntil(b.expiryDate) : 99999;
-    return da - db;
-  });
+  const sorted = [...data.docs]
+    .filter((d) => {
+      const p = propName(d.propertyId);
+      const type = DOC_TYPES.find((t) => t[0] === d.type)?.[1] || d.type || "";
+      return `${d.title || ""} ${type} ${p?.name || ""} ${d.note || ""}`.toLowerCase().includes(q.toLowerCase());
+    })
+    .sort((a, b) => {
+      const da = a.expiryDate ? daysUntil(a.expiryDate) : 99999, db = b.expiryDate ? daysUntil(b.expiryDate) : 99999;
+      return da - db;
+    });
+
+  // Upload a file: store it and ask Claude to suggest the details, then open
+  // the editor pre-filled so you only have to confirm.
+  const onFile = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // let the same file be picked again later
+    if (!file) return;
+    const apiKey = data.settings?.aiKey;
+    if (!apiKey) { alert("Add your Claude API key in Settings first to use auto-fill."); return; }
+    if (!canAnalyze(file)) { alert("Auto-fill works on PDFs and images. For other files, use “Add” and paste a link."); return; }
+    setBusy(true);
+    // Run the upload and the AI suggestion together; tolerate either failing.
+    const [up, ai] = await Promise.allSettled([
+      uploadDocFile(file),
+      suggestDocMeta({ apiKey, file, properties: data.properties }),
+    ]);
+    setBusy(false);
+    if (up.status === "rejected" && ai.status === "rejected") {
+      console.error(up.reason, ai.reason);
+      alert("Couldn't process that document. Check your API key and that Firebase Storage is enabled.");
+      return;
+    }
+    if (ai.status === "rejected") console.error("AI suggestion failed:", ai.reason);
+    if (up.status === "rejected") console.error("Upload failed:", up.reason);
+    const meta = ai.status === "fulfilled" ? ai.value : {};
+    setEditing({
+      title: meta.title || "",
+      type: meta.type || "lease",
+      propertyId: meta.propertyId || "",
+      expiryDate: meta.expiryDate || "",
+      link: up.status === "fulfilled" ? up.value : "",
+    });
+  };
 
   return (
     <>
       <div className="page-h">
-        <div><h1>Documents</h1><p>Leases, insurance, titles — with renewal reminders</p></div>
-        <button className="btn" onClick={() => setEditing({ type: "lease", propertyId: data.properties[0]?.id || "" })}><Plus size={16} /> Add</button>
+        <div><h1>Documents</h1><p>Global document search across leases, insurance, titles and renewals</p></div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button className="btn ghost" onClick={() => setEditing({ type: "lease", propertyId: data.properties[0]?.id || "" })}><Plus size={16} /> Add</button>
+          <button className="btn" onClick={() => fileRef.current?.click()}><Sparkles size={16} /> Upload &amp; auto-fill</button>
+        </div>
       </div>
+      <div className="toolbar">
+        <div className="searchbox"><Search size={16} /><input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search title, type, property, note…" /></div>
+      </div>
+      <input ref={fileRef} type="file" accept="application/pdf,image/*" onChange={onFile} style={{ display: "none" }} />
       <p className="sub" style={{ color: "var(--muted)", fontSize: 13, marginTop: -8, marginBottom: 16 }}>
-        Files live in your cloud drive — store the <b>link</b> here plus the expiry date so nothing lapses.
+        Upload a PDF or photo and Claude suggests the title, type, property and expiry — you just confirm. The file is saved to your own storage.
       </p>
 
       {sorted.length === 0 ? (
         <div className="card"><Empty icon={<FileText size={26} />} title="No documents tracked"
-          text="Add a lease, insurance policy or title and link it to where the file is stored."
-          action={<button className="btn" onClick={() => setEditing({ type: "lease", propertyId: data.properties[0]?.id || "" })}><Plus size={16} /> Add document</button>} /></div>
+          text={data.docs.length ? "No documents match your search." : "Upload a lease, insurance policy or title and let Claude fill in the details — or add one manually."}
+          action={<button className="btn" onClick={() => fileRef.current?.click()}><Sparkles size={16} /> Upload &amp; auto-fill</button>} /></div>
       ) : (
         <div className="card">
           {sorted.map((d) => {
@@ -920,6 +1391,17 @@ function DocsView({ data, update }) {
         </div>
       )}
       {editing && <DocEditor doc={editing} properties={data.properties} onSave={save} onDelete={remove} onClose={() => setEditing(null)} />}
+      {busy && (
+        <div className="scrim" style={{ alignItems: "center" }}>
+          <div className="card" style={{ padding: "26px 30px", display: "flex", alignItems: "center", gap: 14, maxWidth: 320 }}>
+            <Loader2 size={22} className="spin" color="var(--brand)" />
+            <div>
+              <div style={{ fontWeight: 600 }}>Reading your document…</div>
+              <div className="sub" style={{ color: "var(--muted)", fontSize: 13 }}>Claude is filling in the details.</div>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }
@@ -946,7 +1428,7 @@ function DocEditor({ doc, properties, onSave, onDelete, onClose }) {
           </select>
         </Field>
       </div>
-      <Field label="Link to file (Google Drive, Dropbox…)"><input value={d.link} onChange={(e) => set("link", e.target.value)} placeholder="https://" /></Field>
+      <Field label="Link to file (auto-filled when you upload)"><input value={d.link} onChange={(e) => set("link", e.target.value)} placeholder="https://" /></Field>
       <Field label="Expiry / renewal date"><input type="date" value={d.expiryDate} onChange={(e) => set("expiryDate", e.target.value)} /></Field>
       <Field label="Note"><textarea value={d.note} onChange={(e) => set("note", e.target.value)} /></Field>
     </Sheet>
@@ -958,7 +1440,10 @@ function DocEditor({ doc, properties, onSave, onDelete, onClose }) {
 /* ------------------------------------------------------------------ */
 function SettingsView({ data, update, setData, onSignOut, userEmail }) {
   const exportJSON = () => {
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    // Never write the API key into a downloaded backup.
+    const { aiKey, ...settings } = data.settings || {};
+    const safe = { ...data, settings };
+    const blob = new Blob([JSON.stringify(safe, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url; a.download = `casa-ledger-${todayISO()}.json`; a.click();
@@ -981,6 +1466,28 @@ function SettingsView({ data, update, setData, onSignOut, userEmail }) {
             <option value="EUR">Euro (EUR)</option>
           </select>
         </Field>
+      </div>
+      <div className="card" style={{ padding: 18, maxWidth: 420, marginBottom: 16 }}>
+        <span className="eyebrow">AI document assistant</span>
+        <p className="sub" style={{ color: "var(--muted)", fontSize: 13, margin: "8px 0 14px" }}>
+          Paste your Claude API key to enable “Upload &amp; auto-fill” on documents. It’s stored in your
+          private database and shared between both of you. Get one at{" "}
+          <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer">console.anthropic.com</a>.
+        </p>
+        <Field label="Claude API key">
+          <input
+            type="password"
+            autoComplete="off"
+            placeholder={data.settings?.aiKey ? "•••••••••••• (saved)" : "sk-ant-…"}
+            value={data.settings?.aiKey || ""}
+            onChange={(e) => update({ settings: { ...data.settings, aiKey: e.target.value } })}
+          />
+        </Field>
+        {data.settings?.aiKey && (
+          <button className="btn ghost sm" onClick={() => update({ settings: { ...data.settings, aiKey: "" } })}>
+            <Trash2 size={14} /> Remove key
+          </button>
+        )}
       </div>
       <div className="card" style={{ padding: 18, maxWidth: 420, marginBottom: 16 }}>
         <span className="eyebrow">Account</span>

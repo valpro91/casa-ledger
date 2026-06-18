@@ -5,12 +5,16 @@ import {
 import {
   getFirestore, doc, getDoc, setDoc, onSnapshot,
 } from "firebase/firestore";
+import {
+  getStorage, ref, uploadBytes, getDownloadURL,
+} from "firebase/storage";
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
   authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
   projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
   appId: import.meta.env.VITE_FIREBASE_APP_ID,
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
 };
 
 if (!firebaseConfig.apiKey || !firebaseConfig.projectId) {
@@ -21,6 +25,7 @@ if (!firebaseConfig.apiKey || !firebaseConfig.projectId) {
 const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
 const db = getFirestore(app);
+const storage = getStorage(app);
 
 // One shared document holds the whole app's data; both accounts read & write it.
 // Stored as a JSON string so empty/undefined fields never trip Firestore's type rules.
@@ -45,6 +50,16 @@ export function subscribeState(cb) {
     const raw = snap.data().json;
     cb(raw ? JSON.parse(raw) : null);
   });
+}
+
+/* ---- file storage (document uploads) ---- */
+// Uploads a document file and returns a public download URL to store as its link.
+// Access is gated by storage.rules (your two emails only), same model as Firestore.
+export async function uploadDocFile(file) {
+  const safe = (file.name || "document").replace(/[^\w.\-]+/g, "_");
+  const r = ref(storage, `documents/${Date.now()}-${safe}`);
+  await uploadBytes(r, file, { contentType: file.type || "application/octet-stream" });
+  return getDownloadURL(r);
 }
 
 /* ---- auth ---- */
