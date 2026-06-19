@@ -1,19 +1,20 @@
-import Anthropic from "@anthropic-ai/sdk";
-
 /* ------------------------------------------------------------------ */
 /*  AI document assistant                                              */
 /*                                                                    */
 /*  Reads an uploaded PDF or image with Claude and suggests a title,  */
 /*  document type, which property it belongs to, and an expiry date.  */
 /*                                                                    */
-/*  The call runs straight from the browser using the key you store   */
-/*  in Settings — there is no server. That's only sensible because    */
-/*  the app is private to your two accounts; the key never ships in    */
-/*  the public bundle. Swap MODEL to "claude-haiku-4-5" if you'd       */
-/*  rather pay a fraction of a cent per document at slightly lower     */
-/*  accuracy.                                                          */
+/*  The call goes straight from the browser to Claude using the key   */
+/*  you store in Settings — there is no server. That's only sensible  */
+/*  because the app is private to your two accounts; the key never    */
+/*  ships in the public bundle. The "dangerous-direct-browser-access" */
+/*  header is what Anthropic requires to allow browser calls.         */
+/*                                                                    */
+/*  Swap MODEL to "claude-haiku-4-5" to pay a fraction of a cent per  */
+/*  document at slightly lower accuracy.                              */
 /* ------------------------------------------------------------------ */
 const MODEL = "claude-opus-4-8";
+const API_URL = "https://api.anthropic.com/v1/messages";
 
 // Image types Claude can read directly. PDFs go through the document block.
 const IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
@@ -51,54 +52,68 @@ export async function suggestDocMeta({ apiKey, file, properties = [] }) {
     ? properties.map((p) => `- id "${p.id}": ${p.name}${p.address ? ` (${p.address})` : ""}`).join("\n")
     : "(no properties set up yet)";
 
-  const client = new Anthropic({ apiKey, dangerouslyAllowBrowser: true });
-
-  const res = await client.messages.create({
-    model: MODEL,
-    max_tokens: 1024,
-    system:
-      "You label property-management documents. Given a document and a list of the user's " +
-      "rental properties, return a concise human-friendly title, the best-fitting document type, " +
-      "which property it relates to, and any renewal/expiry date you can find. " +
-      `Today is ${new Date().toISOString().slice(0, 10)}.`,
-    messages: [
-      {
-        role: "user",
-        content: [
-          fileBlock,
-          {
-            type: "text",
-            text:
-              `Properties:\n${propLines}\n\n` +
-              "Suggest metadata for this document.\n" +
-              "- title: short and specific, e.g. \"2025 lease – Sosúa 2B\" (max ~60 chars).\n" +
-              `- type: one of ${DOC_TYPE_IDS.join(", ")}.\n` +
-              "- propertyId: the matching id from the list, or \"\" if it isn't specific to one property.\n" +
-              "- expiryDate: the renewal/expiry/end date as YYYY-MM-DD, or \"\" if there is none.",
-          },
-        ],
-      },
-    ],
-    output_config: {
-      format: {
-        type: "json_schema",
-        name: "doc_meta",
-        schema: {
-          type: "object",
-          additionalProperties: false,
-          required: ["title", "type", "propertyId", "expiryDate"],
-          properties: {
-            title: { type: "string" },
-            type: { type: "string", enum: DOC_TYPE_IDS },
-            propertyId: { type: "string", enum: ["", ...properties.map((p) => p.id)] },
-            expiryDate: { type: "string" },
+  const res = await fetch(API_URL, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true",
+    },
+    body: JSON.stringify({
+      model: MODEL,
+      max_tokens: 1024,
+      system:
+        "You label property-management documents. Given a document and a list of the user's " +
+        "rental properties, return a concise human-friendly title, the best-fitting document type, " +
+        "which property it relates to, and any renewal/expiry date you can find. " +
+        `Today is ${new Date().toISOString().slice(0, 10)}.`,
+      messages: [
+        {
+          role: "user",
+          content: [
+            fileBlock,
+            {
+              type: "text",
+              text:
+                `Properties:\n${propLines}\n\n` +
+                "Suggest metadata for this document.\n" +
+                "- title: short and specific, e.g. \"2025 lease – Sosúa 2B\" (max ~60 chars).\n" +
+                `- type: one of ${DOC_TYPE_IDS.join(", ")}.\n` +
+                "- propertyId: the matching id from the list, or \"\" if it isn't specific to one property.\n" +
+                "- expiryDate: the renewal/expiry/end date as YYYY-MM-DD, or \"\" if there is none.",
+            },
+          ],
+        },
+      ],
+      output_config: {
+        format: {
+          type: "json_schema",
+          name: "doc_meta",
+          schema: {
+            type: "object",
+            additionalProperties: false,
+            required: ["title", "type", "propertyId", "expiryDate"],
+            properties: {
+              title: { type: "string" },
+              type: { type: "string", enum: DOC_TYPE_IDS },
+              propertyId: { type: "string", enum: ["", ...properties.map((p) => p.id)] },
+              expiryDate: { type: "string" },
+            },
           },
         },
       },
-    },
+    }),
   });
 
-  const text = res.content.find((b) => b.type === "text")?.text || "{}";
+  if (!res.ok) {
+    let msg = `Claude API error ${res.status}`;
+    try { msg = (await res.json())?.error?.message || msg; } catch { /* keep default */ }
+    throw new Error(msg);
+  }
+
+  const json = await res.json();
+  const text = json.content?.find((b) => b.type === "text")?.text || "{}";
   const meta = JSON.parse(text);
 
   // Guard the values before they reach the form.
